@@ -1,116 +1,187 @@
-gl.setup(NATIVE_WIDTH, NATIVE_HEIGHT)
+hosted_init()
 
-local font = resource.load_font "default-font.ttf"
-local text = ""
-
-util.json_watch("config.json", function(config)
-    -- called each time the configuration is changed. 'config'
-    -- contains new current configuration values set by the user.
-
-    text = config.text -- assign configuration 'text' value to 'text' variable
-end)
-
-function node.render()
-    gl.clear(0,0,0,1)
-    font:write(250, 300, text, 64, 1,1,1,1) -- use the CONFIG value
-end
-
-node.alias "looper"
-
--- This version uses low level video playback 
--- if this line isn't commented.
-local raw = sys.get_ext "raw_video"
-
-if raw then
-    loader = raw.load_video
+if CONFIG.auto_resolution then
+    gl.setup(NATIVE_WIDTH, NATIVE_HEIGHT)
 else
-    loader = resource.load_video
+    gl.setup(CONFIG.width, CONFIG.height)
 end
 
-local Looper = function(file)
-    local vid = loader(file, true, true)
-    local function draw()
-        if not raw then
-            util.draw_correct(vid, 0, 0, WIDTH, HEIGHT)
-        end
-        return true
+node.set_flag("slow_gc", false)
+
+local iblib = require "iblib"
+
+setmetatable(_G, {
+    __newindex = function(t, k, v)
+        error("cannot assign " .. k)
     end
-    local function set_running(running)
-        if running then
-            if raw then vid:target(0, 0, WIDTH, HEIGHT):layer(-1) end
-            vid:start()
-        else
-            vid:stop()
-            if raw then vid:target(0, 2000, 0, 2000) end -- move video layer away
-        end
+})
+
+local function make_blender(blend_src)
+    local function create_shader(main_src)
+        local src = [[
+            uniform sampler2D Texture;
+            varying vec2 TexCoord;
+            uniform vec4 Color;
+            uniform float progress;
+
+            float blend(float x) {
+                ]] .. blend_src .. [[
+            }
+            void main() {
+                ]] .. main_src .. [[
+            }
+        ]]
+        return resource.create_shader(src)
     end
-    return {
-        draw = draw;
-        set_running = set_running;
-    }
+    local s1 = create_shader[[
+        gl_FragColor = texture2D(Texture, TexCoord) * vec4(1.0 - blend(progress));
+    ]]
+    local s2 = create_shader[[
+        gl_FragColor = texture2D(Texture, TexCoord) * vec4(blend(progress));
+    ]]
+    return function(c, n, progress, x1, y1, x2, y2)
+        s1:use{ progress = progress }
+        util.draw_correct(c, x1, y1, x2, y2)
+        s2:use{ progress = progress }
+        util.draw_correct(n, x1, y1, x2, y2)
+        s2:deactivate()
+    end
 end
 
-local Intermission = function(file)
-    local vid = resource.create_colored_texture(0, 0, 0, 0)
-    local function draw()
-        if not raw then
-            util.draw_correct(vid, 0, 0, WIDTH, HEIGHT)
-        end
-        return vid:state() ~= "finished"
-    end
-    local function preload()
-        if vid then vid:dispose() end
-        vid = loader(file, true, false, true)
-    end
-    local function set_running(running)
-        if running then
-            if raw then vid:target(0, 0, WIDTH, HEIGHT):layer(-1) end
-            vid:start()
-        else
-            preload()
-        end
-    end
-
-    preload()
-
-    return {
-        draw = draw;
-        set_running = set_running;
-    }
-end
-
-local loop = Looper "loop.mp4"
-local intermission = Intermission "intermission.mp4"
-
-local surface
-
-local function start_loop()
-    loop.set_running(true)
-    intermission.set_running(false)
-    surface = loop
-end
-
-local function start_intermission()
-    intermission.set_running(true)
-    loop.set_running(false)
-    surface = intermission
-end
-
-util.data_mapper{
-    ["set"] = function(new_mode)
-        if new_mode == "loop" then
-            start_loop()
-        else
-            start_intermission()
-        end
+local faders = {
+    crossfade = function(c, n, progress, x1, y1, x2, y2)
+        util.draw_correct(c, x1, y1, x2, y2, 1.0 - progress)
+        util.draw_correct(n, x1, y1, x2, y2, progress)
     end;
+
+    move = function(c, n, progress, x1, y1, x2, y2)
+        local xx = WIDTH * progress
+        util.draw_correct(c, x1 + xx, y1, x2 + xx, y2, 1.0 - progress)
+        util.draw_correct(n, x1 - WIDTH + xx, y1, x2 - WIDTH + xx, y2, progress)
+    end;
+
+    move_shrink = function(c, n, progress, x1, y1, x2, y2)
+        local xx = WIDTH * progress
+        util.draw_correct(c, x1 + xx, y1, x2, y2, 1.0 - progress)
+        util.draw_correct(n, x1 - WIDTH + xx, y1, x2 - WIDTH + xx, y2, progress)
+    end;
+
+    flip = function(c, n, progress, x1, y1, x2, y2)
+        local xx = WIDTH * progress
+        gl.pushMatrix()
+            gl.translate(WIDTH/2, HEIGHT/2)
+            gl.rotate(progress * 90, 0, 1, 0)
+            gl.translate(-WIDTH/2, -HEIGHT/2)
+            util.draw_correct(c, x1 + xx, y1, x2, y2, 1.0 - progress)
+        gl.popMatrix()
+
+        gl.pushMatrix()
+            gl.translate(WIDTH/2, HEIGHT/2)
+            gl.rotate(90 - progress * 90, 0, 1, 0)
+            gl.translate(-WIDTH/2, -HEIGHT/2)
+            util.draw_correct(n, x1 - WIDTH + xx, y1, x2 - WIDTH + xx, y2, progress)
+        gl.popMatrix()
+    end;
+
+    blend1 = make_blender[[
+        x = 1.0 - clamp(TexCoord.x - 1.0 + x * 3.0, 0.0, 1.0);
+        return 2.0 * x * x * x - 3.0 * x * x + 1.0;
+    ]],
+
+    blend2 = make_blender[[
+        x = 1.0 - clamp(TexCoord.y - 1.0 + x * 3.0, 0.0, 1.0);
+        return 2.0 * x * x * x - 3.0 * x * x + 1.0;
+    ]],
+
+    blend3 = make_blender[[
+        vec2 center = vec2(0.5, 0.5);
+        vec2 c = TexCoord - center;
+        float angle = atan(c.x, c.y) / 3.1415926536;
+        float dist = length(c);
+        x = abs(mod(angle + dist * 5.0 + x, 2.0) - 1.0) + dist - 2.0 + x * 4.0;
+        x = 1.0 - clamp(x, 0.0, 1.0);
+        return 2.0 * x * x * x - 3.0 * x * x + 1.0;
+    ]],
+
+    blend4 = make_blender[[
+        float y = sin( (TexCoord.x - 0.5) * x * 4.0) * sin( (TexCoord.y - 0.5) * x * 4.0);
+        return clamp(y - 1.0 + x * 4.0, 0.0, 1.0);  
+    ]],
+
+    blend5 = make_blender[[
+        return clamp(distance(TexCoord, vec2(0.5, 0.5)) - 1.0 + x * 3.0, 0.0, 1.0);
+    ]],
+
+    blend6 = make_blender[[
+        return 1.0 - (2.0 * x * x * x - 3.0 * x * x + 1.0);
+    ]],
 }
 
-start_loop()
+local title_start = 99999999
+
+local idx = 0 -- offset before first item. will be incremented during first get_next_item
+local playlist_source = function()
+    return CONFIG.playlist
+end;
+
+local overlay = resource.create_colored_texture(0, 0, 0, 1)
+
+local player = iblib.playlist{
+    get_next_item = function()
+        local playlist = playlist_source()
+        idx = idx + 1
+        if idx > #playlist then
+            idx = 1
+        end
+
+        local item = playlist[idx]
+        if not item then
+            return nil
+        else
+            return {
+                title = item.title;
+                duration = item.duration;
+                obj = item.file();
+            }
+        end
+    end;
+
+    get_switch_time = function()
+        return CONFIG.switch_time
+    end;
+
+    fade = function(...)
+        title_start = sys.now() + 1.0
+        return faders[CONFIG.fade](...)
+    end;
+
+    draw = util.draw_correct;
+}
 
 function node.render()
-    gl.clear(0, 0, 0, 0)
-    if not surface.draw() then
-        start_loop()
+    CONFIG.background_color.clear()
+
+    player.draw(0, 0, WIDTH, HEIGHT)
+
+    if CONFIG.show_title then
+        local now = sys.now()
+        if now > title_start then
+            local in_title = now - title_start
+            local alpha = 1.0
+            if in_title < 0.5 then
+                alpha = in_title * 2
+            elseif in_title > CONFIG.title_duration then
+                alpha = 0
+            elseif in_title > CONFIG.title_duration - 0.5 then
+                alpha = 1.0 - (in_title - CONFIG.title_duration + 0.5) * 2
+            end
+            overlay:draw(0, HEIGHT - CONFIG.title_size - 10, WIDTH, HEIGHT, 0.7 * alpha)
+            CONFIG.title_font:write(
+                10, HEIGHT - CONFIG.title_size - 5, 
+                player.get_current_item().title,
+                CONFIG.title_size,
+                1, 1, 1, alpha
+            )
+        end
     end
 end
