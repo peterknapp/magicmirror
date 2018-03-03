@@ -195,8 +195,9 @@ function node.render()
     font:write(120, 320, "Hello World", 100, 1,1,1,1)
 end
 
-node.event("input", function(line, client)
+hid = node.event("input", function(line, client)
     print("Input was: " .. line)
+    font:write(120, 320, line, 100, 1,1,1,1)
 
     -- send something back to the client that sent us data
     node.client_write(client, "data was received")
