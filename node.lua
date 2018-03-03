@@ -197,3 +197,10 @@ function node.render()
     local name = io.read()
     io.write('Nice to meet you, ', name, '!\n')
 end
+
+node.event("input", function(line, client)
+    print("Input was: " .. line)
+
+    -- send something back to the client that sent us data
+    node.client_write(client, "data was received")
+end)
