@@ -193,9 +193,6 @@ local font = resource.load_font("silkscreen.ttf")
 
 function node.render()
     font:write(120, 320, "Hello World", 100, 1,1,1,1)
-    io.write('Hello, what is your name? ')
-    local name = io.read()
-    io.write('Nice to meet you, ', name, '!\n')
 end
 
 node.event("input", function(line, client)
